@@ -449,6 +449,157 @@ def generate_page_image(project_id, page_id):
         return error_response('AI_SERVICE_ERROR', str(e), 503)
 
 
+@page_bp.route('/<project_id>/pages/<page_id>/generate/prompt', methods=['POST'])
+def generate_page_prompt(project_id, page_id):
+    """
+    POST /api/projects/{project_id}/pages/{page_id}/generate/prompt - Generate prompt only
+    """
+    try:
+        page = Page.query.get(page_id)
+        
+        if not page or page.project_id != project_id:
+            return not_found('Page')
+        
+        project = Project.query.get(project_id)
+        
+        # Initialize services
+        ai_service = get_ai_service()
+        file_service = FileService(current_app.config['UPLOAD_FOLDER'])
+        
+        # Get description content
+        desc_content = page.get_description_content()
+        if not desc_content:
+            return bad_request("Page must have description content first")
+            
+        # Reconstruct full outline (needed for prompt generation context)
+        all_pages = Page.query.filter_by(project_id=project_id).order_by(Page.order_index).all()
+        outline = []
+        current_part = None
+        current_part_pages = []
+        
+        for p in all_pages:
+            oc = p.get_outline_content()
+            if not oc:
+                continue
+            page_data = oc.copy()
+            if p.part:
+                if current_part and current_part != p.part:
+                    outline.append({"part": current_part, "pages": current_part_pages})
+                    current_part_pages = []
+                current_part = p.part
+                if 'part' in page_data: del page_data['part']
+                current_part_pages.append(page_data)
+            else:
+                if current_part:
+                    outline.append({"part": current_part, "pages": current_part_pages})
+                    current_part = None
+                    current_part_pages = []
+                outline.append(page_data)
+        if current_part:
+            outline.append({"part": current_part, "pages": current_part_pages})
+
+        # Get text content
+        desc_text = desc_content.get('text', '')
+        if not desc_text and desc_content.get('text_content'):
+            text_content = desc_content.get('text_content', [])
+            if isinstance(text_content, list):
+                desc_text = '\n'.join(text_content)
+            else:
+                desc_text = str(text_content)
+                
+        # Extract image URLs
+        additional_ref_images = []
+        has_material_images = False
+        if desc_text:
+            image_urls = ai_service.extract_image_urls_from_markdown(desc_text)
+            if image_urls:
+                additional_ref_images = image_urls
+                has_material_images = True
+                
+        # Get extra requirements
+        language = request.get_json().get('language', current_app.config.get('OUTPUT_LANGUAGE', 'zh')) if request.is_json else current_app.config.get('OUTPUT_LANGUAGE', 'zh')
+        combined_requirements = project.extra_requirements or ""
+        if project.template_style:
+            style_requirement = f"\n\nppt页面风格描述：\n\n{project.template_style}"
+            combined_requirements = combined_requirements + style_requirement
+
+        # Generate prompt
+        page_data = page.get_outline_content() or {}
+        if page.part:
+            page_data['part'] = page.part
+            
+        # Check if template should be used
+        use_template = True # Default to true for manual generation context
+        ref_image_path = file_service.get_template_path(project_id)
+        
+        prompt = ai_service.generate_image_prompt(
+            outline, page_data, desc_text, page.order_index + 1,
+            has_material_images=has_material_images,
+            extra_requirements=combined_requirements if combined_requirements.strip() else None,
+            language=language,
+            has_template=use_template
+        )
+        
+        # Construct response
+        response_data = {
+            'prompt': prompt,
+            'ref_image_url': None,
+            'additional_ref_images': additional_ref_images
+        }
+        
+        if ref_image_path:
+            # Convert absolute path to URL
+            relative_path = Path(ref_image_path).relative_to(current_app.config['UPLOAD_FOLDER']).as_posix()
+            response_data['ref_image_url'] = f"/files/{relative_path}"
+            
+        return success_response(response_data)
+        
+    except Exception as e:
+        return error_response('SERVER_ERROR', str(e), 500)
+
+
+@page_bp.route('/<project_id>/pages/<page_id>/upload/image', methods=['POST'])
+def upload_page_image(project_id, page_id):
+    """
+    POST /api/projects/{project_id}/pages/{page_id}/upload/image - Upload manually generated image
+    """
+    try:
+        page = Page.query.get(page_id)
+        if not page or page.project_id != project_id:
+            return not_found('Page')
+            
+        if 'file' not in request.files:
+            return bad_request('No file part')
+            
+        file = request.files['file']
+        if file.filename == '':
+            return bad_request('No selected file')
+            
+        file_service = FileService(current_app.config['UPLOAD_FOLDER'])
+        
+        # Save image securely using PIL to ensure validity and format
+        try:
+            from PIL import Image
+            image = Image.open(file)
+            image.load() # Verify it's a valid image
+            
+            # Use the shared save function to handle versioning, caching, and DB updates
+            from services.task_manager import save_image_with_version
+            image_path, version = save_image_with_version(
+                image, project_id, page_id, file_service, page_obj=page, image_format='PNG'
+            )
+            
+            return success_response(page.to_dict(include_versions=True))
+            
+        except Exception as e:
+            logger.error(f"Failed to process uploaded image: {e}")
+            return bad_request(f"Invalid image file: {str(e)}")
+            
+    except Exception as e:
+        db.session.rollback()
+        return error_response('SERVER_ERROR', str(e), 500)
+
+
 @page_bp.route('/<project_id>/pages/<page_id>/edit/image', methods=['POST'])
 def edit_page_image(project_id, page_id):
     """

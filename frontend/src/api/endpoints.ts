@@ -233,6 +233,42 @@ export const generateImages = async (projectId: string, language?: OutputLanguag
 };
 
 /**
+ * 生成单页 prompt（手动生成用）
+ */
+export const generatePagePrompt = async (
+  projectId: string,
+  pageId: string,
+  language?: OutputLanguage
+): Promise<ApiResponse<{ prompt: string; ref_image_url: string | null; additional_ref_images: string[] }>> => {
+  const lang = language || await getStoredOutputLanguage();
+  const response = await apiClient.post<ApiResponse<{ prompt: string; ref_image_url: string | null; additional_ref_images: string[] }>>(
+    `/api/projects/${projectId}/pages/${pageId}/generate/prompt`,
+    { language: lang }
+  );
+  return response.data;
+};
+
+
+/**
+ * 上传单页图片（手动生成后回传）
+ */
+export const uploadPageImage = async (
+  projectId: string,
+  pageId: string,
+  file: File
+): Promise<ApiResponse<Page>> => {
+  const formData = new FormData();
+  formData.append('file', file);
+
+  const response = await apiClient.post<ApiResponse<Page>>(
+    `/api/projects/${projectId}/pages/${pageId}/upload/image`,
+    formData
+  );
+  return response.data;
+};
+
+
+/**
  * 生成单页图片
  */
 export const generatePageImage = async (
